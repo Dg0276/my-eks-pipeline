@@ -1,0 +1,45 @@
+pipeline {
+    agent any
+
+    environment {
+        AWS_REGION       = 'us-east-1'
+        EKS_CLUSTER_NAME = 'my-class-app-eks'
+        ECR_REPO_NAME    = 'dingay2003/my-class-app'
+        IMAGE_TAG        = "v${BUILD_NUMBER}"
+    }
+
+    stages {
+        stage('Execute Pipeline with AWS Credentials') {
+            steps {
+                // This block forces the credentials from the IAM role to be used
+                withAWS {
+                    script {
+                        // --- Stage: Prepare Environment ---
+                        echo "Fetching AWS Account ID..."
+                        env.aws_account_id = sh(returnStdout: true, script: 'aws sts get-caller-identity --query Account --output text').trim()
+                        echo "AWS Account ID is now: ${env.aws_account_id}"
+
+                        // Fail the build immediately if the ID is still null
+                        if (env.aws_account_id == null || env.aws_account_id.isEmpty()) {
+                            error "Critical Error: Failed to get AWS Account ID. Halting."
+                        }
+
+                        // --- Stage: Build & Push Docker Image ---
+                        echo "Building and pushing Docker image..."
+                        def fullImageName = "${env.aws_account_id}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO_NAME}:${IMAGE_TAG}"
+                        sh "aws ecr get-login-password --region ${AWS_REGION} | docker login --username AWS --password-stdin ${env.aws_account_id}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+                        docker.build(fullImageName, '.')
+                        sh "docker push ${fullImageName}"
+
+                        // --- Stage: Deploy to Kubernetes ---
+                        echo "Deploying application to EKS..."
+                        sh "aws eks --region ${AWS_REGION} update-kubeconfig --name ${EKS_CLUSTER_NAME}"
+                        sh "sed -i 's|<ECR_REPOSITORY_URI>:<IMAGE_TAG>|${fullImageName}|g' deployment.yaml"
+                        sh "kubectl apply -f deployment.yaml"
+                        sh "kubectl apply -f service.yaml"
+                    }
+                }
+            }
+        }
+    }
+}
